@@ -6,6 +6,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import T5Tokenizer, T5EncoderModel, CLIPTokenizer, CLIPTextModel
 from ....lvdm.common import autocast
 from ....utils.utils import count_params
+import os
 
 import comfy.model_management as mm
 device = mm.get_torch_device()
@@ -187,6 +188,8 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
                  freeze=True, layer="last"):
         super().__init__()
         assert layer in self.LAYERS
+        if os.path.exists('/stable-diffusion-cache/models/clip/open_clip_pytorch_model.bin') and arch=="ViT-H-14":
+            version = '/stable-diffusion-cache/models/clip/open_clip_pytorch_model.bin'
         model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'), pretrained=version)
         del model.visual
         self.model = model
@@ -244,6 +247,8 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
     def __init__(self, arch="ViT-H-14", version="laion2b_s32b_b79k", device=device, max_length=77,
                  freeze=True, layer="pooled", antialias=True, ucg_rate=0.):
         super().__init__()
+        if os.path.exists('/stable-diffusion-cache/models/clip/open_clip_pytorch_model.bin') and arch=="ViT-H-14":
+            version = '/stable-diffusion-cache/models/clip/open_clip_pytorch_model.bin'
         model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'),
                                                             pretrained=version, )
         del model.transformer
@@ -302,6 +307,8 @@ class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
     def __init__(self, arch="ViT-H-14", version="laion2b_s32b_b79k", device=device,
                  freeze=True, layer="pooled", antialias=True):
         super().__init__()
+        if os.path.exists('/stable-diffusion-cache/models/clip/open_clip_pytorch_model.bin') and arch=="ViT-H-14":
+            version = '/stable-diffusion-cache/models/clip/open_clip_pytorch_model.bin'
         return
         model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'),
                                                             pretrained=version, )

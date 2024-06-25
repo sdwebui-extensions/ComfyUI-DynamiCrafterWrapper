@@ -76,12 +76,15 @@ class DownloadAndLoadDynamiCrafterModel:
             
 
             if not os.path.exists(model_path):
-                print(f"Downloading model to: {model_path}")
-                from huggingface_hub import snapshot_download
-                snapshot_download(repo_id="Kijai/DynamiCrafter_pruned", 
-                                  allow_patterns=[f"*{model}*"],
-                                  local_dir=download_path, 
-                                  local_dir_use_symlinks=False)
+                if os.path.exists(os.path.join("/stable-diffusion-cache/models/dynamiccraft", model)):
+                    model_path = os.path.join("/stable-diffusion-cache/models/dynamiccraft", model)
+                else:
+                    print(f"Downloading model to: {model_path}")
+                    from huggingface_hub import snapshot_download
+                    snapshot_download(repo_id="Kijai/DynamiCrafter_pruned", 
+                                    allow_patterns=[f"*{model}*"],
+                                    local_dir=download_path, 
+                                    local_dir_use_symlinks=False)
 
             ckpt_base_name = os.path.basename(model_path)
             print(f"Loading model from: {model_path}")
@@ -148,18 +151,21 @@ class DownloadAndLoadCLIPModel:
         download_path = os.path.join(folder_paths.models_dir, "temp")
         model_path = os.path.join(folder_paths.models_dir, "clip", model)
         if not os.path.exists(model_path):
-            print(f"Downloading model to: {model_path}")
-            filename = "model.fp16.safetensors" if "fp16" in model else "model.safetensors"
-            subfolder = "text_encoder"
-            from huggingface_hub import hf_hub_download
-            hf_hub_download(repo_id="stabilityai/stable-diffusion-2-1", 
-                                subfolder = subfolder,
-                                filename = filename,
-                                local_dir=download_path, 
-                                local_dir_use_symlinks=False)
-            source_file_path = os.path.join(download_path, subfolder, filename)
-            destination_file_path = model_path
-            shutil.move(source_file_path, destination_file_path)
+            if os.path.exists(os.path.join("/stable-diffusion-cache/models/clip", model)):
+                model_path = os.path.join("/stable-diffusion-cache/models/clip", model)
+            else:
+                print(f"Downloading model to: {model_path}")
+                filename = "model.fp16.safetensors" if "fp16" in model else "model.safetensors"
+                subfolder = "text_encoder"
+                from huggingface_hub import hf_hub_download
+                hf_hub_download(repo_id="stabilityai/stable-diffusion-2-1", 
+                                    subfolder = subfolder,
+                                    filename = filename,
+                                    local_dir=download_path, 
+                                    local_dir_use_symlinks=False)
+                source_file_path = os.path.join(download_path, subfolder, filename)
+                destination_file_path = model_path
+                shutil.move(source_file_path, destination_file_path)
 
         clip_type = comfy.sd.CLIPType.STABLE_DIFFUSION
         clip = comfy.sd.load_clip(ckpt_paths = [model_path], embedding_directory=folder_paths.get_folder_paths("embeddings"), clip_type=clip_type)
@@ -194,22 +200,25 @@ class DownloadAndLoadCLIPVisionModel:
         download_path = os.path.join(folder_paths.models_dir, "temp")
         model_path = os.path.join(folder_paths.models_dir, "clip_vision", model)
         if not os.path.exists(model_path):
-            print(f"Downloading model to: {model_path}")
-            from huggingface_hub import hf_hub_download
-            if "fp16" in model:                
-                hf_hub_download(repo_id="Kijai/CLIPVisionModelWithProjection_fp16", 
-                                    filename = "CLIP-ViT-H-fp16.safetensors",
-                                    local_dir = os.path.join(folder_paths.models_dir, "clip_vision"), 
-                                    local_dir_use_symlinks=False)
+            if os.path.exists(os.path.join("/stable-diffusion-cache/models/annotator/clip_vision", model)):
+                model_path = os.path.join("/stable-diffusion-cache/models/annotator/clip_vision", model)
             else:
-                filename = "open_clip_pytorch_model.safetensors"
-                hf_hub_download(repo_id="laion/CLIP-ViT-H-14-laion2B-s32B-b79K", 
-                                    filename = filename,
-                                    local_dir=download_path, 
-                                    local_dir_use_symlinks=False)
-                source_file_path = os.path.join(download_path, filename)
-                destination_file_path = model_path
-                shutil.move(source_file_path, destination_file_path)
+                print(f"Downloading model to: {model_path}")
+                from huggingface_hub import hf_hub_download
+                if "fp16" in model:                
+                    hf_hub_download(repo_id="Kijai/CLIPVisionModelWithProjection_fp16", 
+                                        filename = "CLIP-ViT-H-fp16.safetensors",
+                                        local_dir = os.path.join(folder_paths.models_dir, "clip_vision"), 
+                                        local_dir_use_symlinks=False)
+                else:
+                    filename = "open_clip_pytorch_model.safetensors"
+                    hf_hub_download(repo_id="laion/CLIP-ViT-H-14-laion2B-s32B-b79K", 
+                                        filename = filename,
+                                        local_dir=download_path, 
+                                        local_dir_use_symlinks=False)
+                    source_file_path = os.path.join(download_path, filename)
+                    destination_file_path = model_path
+                    shutil.move(source_file_path, destination_file_path)
 
         clip_vision = comfy.clip_vision.load(model_path)
 
@@ -217,11 +226,14 @@ class DownloadAndLoadCLIPVisionModel:
            
         return (clip_vision,)
     
+cache_filename_list = []
+if os.path.exists("/stable-diffusion-cache/models/dynamiccraft"):
+    cache_filename_list = os.listdir("/stable-diffusion-cache/models/dynamiccraft")
 class DynamiCrafterModelLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
+            "ckpt_name": (folder_paths.get_filename_list("checkpoints") + cache_filename_list, ),
             "dtype": (
                     [
                         'fp32',
@@ -249,7 +261,10 @@ class DynamiCrafterModelLoader:
         }
         if not hasattr(self, 'model') or self.model == None or custom_config != self.current_config:
             self.current_config = custom_config
-            model_path = folder_paths.get_full_path("checkpoints", ckpt_name)
+            if os.path.exists(os.path.join("/stable-diffusion-cache/models/dynamiccraft", ckpt_name)):
+                model_path = os.path.join("/stable-diffusion-cache/models/dynamiccraft", ckpt_name)
+            else:
+                model_path = folder_paths.get_full_path("checkpoints", ckpt_name)
             ckpt_base_name = os.path.basename(ckpt_name)
             base_name, _ = os.path.splitext(ckpt_base_name)
             if 'toon' in base_name and '512' in base_name:
