@@ -44,13 +44,15 @@ class DownloadAndLoadDynamiCrafterModel:
     def INPUT_TYPES(s):
         return {"required": {
             "model": (
-                    [   'tooncrafter_512_interp-fp16.safetensors',
-                        'dynamicrafter_512_interp_v1_bf16.safetensors',
-                        'dynamicrafter_1024_v1_bf16.safetensors',
-                        'DynamiCrafter-CIL-512-no-watermark-fp16.safetensors',
+                    [   'tooncrafter_512_interp-pruned-fp16.safetensors',
+                        'dynamicrafter_512_fp16_pruned.safetensors',
+                        'dynamicrafter_512_interp_fp16_pruned.safetensors',
+                        'dynamicrafter_1024_fp16_pruned.safetensors',
+                        'dynamicrafter-CIL-512-no-watermark-pruned-fp16.safetensors',
+                        'dynamicrafter-CIL-1024-pruned-fp16.safetensors'
                     ],
                     {
-                    "default": 'tooncrafter_512_interp-fp16.safetensors'
+                    "default": 'tooncrafter_512_interp-pruned-fp16.safetensors'
                     }),
             "dtype": (
                     [
@@ -271,6 +273,7 @@ class DynamiCrafterModelLoader:
     CATEGORY = "DynamiCrafterWrapper"
 
     def loadmodel(self, dtype, ckpt_name, fp8_unet=False):
+        device = mm.get_torch_device()
         mm.soft_empty_cache()
         custom_config = {
             'dtype': dtype,
@@ -285,6 +288,7 @@ class DynamiCrafterModelLoader:
                 model_path = folder_paths.get_full_path("checkpoints", ckpt_name)
             ckpt_base_name = os.path.basename(ckpt_name)
             base_name, _ = os.path.splitext(ckpt_base_name)
+            print(f"Loading model from: {model_path}")
             if 'toon' in base_name and '512' in base_name:
                 config_file=os.path.join(script_directory, "configs", "tooncrafter_512_interp.yaml")
             elif 'interp' in base_name and '512' in base_name:
@@ -301,24 +305,29 @@ class DynamiCrafterModelLoader:
 
             model_config = config.pop("model", OmegaConf.create())
             model_config['params']['unet_config']['params']['use_checkpoint']=False
-            self.model = instantiate_from_config(model_config)
-            self.model = load_model_checkpoint(self.model, model_path)
-            self.model.eval()
+
             if dtype == "auto":
                 try:
                     if mm.should_use_fp16():
-                        self.model.to(convert_dtype('fp16'))
+                        precision = (convert_dtype('fp16'))
                     elif mm.should_use_bf16():
-                        self.model.to(convert_dtype('bf16'))
+                        precision = (convert_dtype('bf16'))
                     else:
-                        self.model.to(convert_dtype('fp32'))
+                        precision = (convert_dtype('fp32'))
                 except:
                     raise AttributeError("ComfyUI version too old, can't autodetect properly. Set your dtype manually.")
             else:
-                self.model.to(convert_dtype(dtype))
+                precision = (convert_dtype(dtype))
+
+            with (init_empty_weights() if is_accelerate_available else nullcontext()):
+                self.model = instantiate_from_config(model_config)
+            self.model = load_model_checkpoint(self.model, model_path, precision, device)
+            self.model.to(precision).to(device).eval()
+            
             if fp8_unet:
                 self.model.model.diffusion_model = self.model.model.diffusion_model.to(torch.float8_e4m3fn)
             print(f"Model using dtype: {self.model.dtype}")
+
             dcmodel = {
                 'model': self.model,
                 'model_name': ckpt_name,
@@ -490,22 +499,29 @@ class DynamiCrafterI2V:
                 mask = torch.where(mask < 1.0, torch.tensor(0.0, device=device, dtype=dtype), torch.tensor(1.0, device=device, dtype=dtype))
 
             if init_noise is not None:
-                init = init_noise['noise'].to(dtype).to(device)
+                if init_noise['analytic_init']:
+                    eps=torch.randn_like(init_noise['mu_p'])
+                    sigma_p = init_noise['sigma_p']
+                    init = (init_noise['mu_p'] + sigma_p*eps).to(dtype).to(device)
+                    if noise_shape[2] % init.shape[2] == 0:
+                        init = init.repeat(1, 1, noise_shape[2] // init.shape[2], 1, 1)
+                    else:
+                        raise ValueError("The target dimension size is not an integral multiple of the original dimension size.")
+                else:
+                    init = None
                 timestep_spacing = "uniform_trailing"
-                guidance_rescale = 0.0
+                guidance_rescale = 0.7
                 ddpm_from = init_noise['M']
                 
-                if noise_shape[2] % init.shape[2] == 0:
-                    init = init.repeat(1, 1, noise_shape[2] // init.shape[2], 1, 1)
-                else:
-                    raise ValueError("The target dimension size is not an integral multiple of the original dimension size.")
+               
             else:
                 init = None
                 ddpm_from = 1000
 
             #inference
             ddim_sampler = DDIMSampler(self.model)
-            samples, _ = ddim_sampler.sample(S=steps,
+            samples, _ = ddim_sampler.sample(
+                                            S=steps,
                                             conditioning=cond,
                                             batch_size=noise_shape[0],
                                             shape=noise_shape[1:],
@@ -524,7 +540,6 @@ class DynamiCrafterI2V:
                                             x0=img_tensor_repeat.clone() if mask is not None else None,
                                             frame_window_size = frame_window_size,
                                             frame_window_stride = frame_window_stride,
-                                            noise_multiplier=1.0,
                                             ddpm_from=ddpm_from
                                             )
             
@@ -582,25 +597,23 @@ class DynamiCrafterLoadInitNoise:
         model_path = os.path.join(script_directory, 'init_noises', analytic_noise)
 
         # Analytic-Init:load initial noise 
-        #dic=torch.load(model_path)
         dic = comfy.utils.load_torch_file(model_path)
         expectation_X_0=dic["Expectation_X0"].to(device)
         tr_Cov_d=dic["Tr_Cov_d"].to(device)
+        
         sqrt_alpha_t=model['model'].get_sqrt_alpha_t_bar(expectation_X_0,torch.tensor([M-1]).to(device))
         mu_p=sqrt_alpha_t*expectation_X_0
         alpha_t=sqrt_alpha_t**2
         sigma_p=torch.sqrt(1-alpha_t + alpha_t*tr_Cov_d)
-        eps=torch.randn_like(mu_p)
-        
-        if analytic_init:
-            init=mu_p+sigma_p*eps
-        else :
-            init=torch.randn_like(mu_p)
-        print("init noise shape: ",init.shape)
 
-        init_noise = {"noise": init, "M": M}
-        width = init.shape[4] * 8
-        height = init.shape[3] * 8
+        init_noise = {
+            "sigma_p": sigma_p,
+            "mu_p": mu_p,
+            "M": M,
+            "analytic_init": analytic_init
+            }
+        width = mu_p.shape[4] * 8
+        height = mu_p.shape[3] * 8
        
         return (init_noise, width, height)
 
@@ -633,7 +646,7 @@ class ToonCrafterInterpolation:
                 "image_embed_ratio": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "augmentation_level": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.0001}),
                 "optional_latents": ("LATENT",),
-                "latent_noise_multiplier": ("FLOAT", {"default": 1.0, "min": 0, "max": 100, "step": 0.001}),
+                "ddpm_from": ("INT", {"default": 1000, "min": 1, "max": 1000, "step": 1}),
             }
         }
 
@@ -642,7 +655,7 @@ class ToonCrafterInterpolation:
     FUNCTION = "process"
     CATEGORY = "DynamiCrafterWrapper"
 
-    def process(self, model, clip_vision, images, positive, negative, cfg, steps, eta, seed, fs, frames, vae_dtype, image_embed_ratio=1.0, augmentation_level=0, optional_latents=None, latent_noise_multiplier=1.0):
+    def process(self, model, clip_vision, images, positive, negative, cfg, steps, eta, seed, fs, frames, vae_dtype, image_embed_ratio=1.0, augmentation_level=0, optional_latents=None, ddpm_from=1000):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         mm.unload_all_models()
@@ -800,7 +813,7 @@ class ToonCrafterInterpolation:
                                                 x0=None,
                                                 frame_window_size = 16,
                                                 frame_window_stride = 4,
-                                                noise_multiplier = latent_noise_multiplier
+                                                ddpm_from=ddpm_from
                                                 )
                 print(f"Sampled {i+1} out of {(len(images) - 1)}")
                 assert not torch.isnan(samples).any().item(), "Resulting tensor containts NaNs. I'm unsure why this happens, changing step count and/or image dimensions might help."
@@ -883,17 +896,17 @@ class ToonCrafterDecode:
             batch_end = min(i + 16, num_samples)  # Ensure we don't go beyond the tensor's size
             batch_samples = samples[batch_start:batch_end].to(self.model.first_stage_model.device)
             with torch.autocast(comfy.model_management.get_autocast_device(device), dtype=self.model.first_stage_model.dtype) if autocast_condition else nullcontext():
-                if mm.XFORMERS_IS_AVAILABLE:
-                    print(f"Decoding frames {iteration_counter * 16} - {16 + iteration_counter * 16} out of {num_samples} using xformers")
-                    if hs is not None:
-                        hs_ = hs[iteration_counter]
-                        hs_ = [t.to(self.model.first_stage_model.device) for t in hs_]
-                        additional_decode_kwargs = {'ref_context': hs_}
-                        decoded_images = self.model.decode_first_stage(batch_samples, **additional_decode_kwargs) #b c t h w
-                    else:
-                        decoded_images = self.model.decode_first_stage(batch_samples) #b c t h w     
+                #if mm.XFORMERS_IS_AVAILABLE:
+                print(f"Decoding frames {iteration_counter * 16} - {16 + iteration_counter * 16} out of {num_samples} using xformers")
+                if hs is not None:
+                    hs_ = hs[iteration_counter]
+                    hs_ = [t.to(self.model.first_stage_model.device) for t in hs_]
+                    additional_decode_kwargs = {'ref_context': hs_}
+                    decoded_images = self.model.decode_first_stage(batch_samples, **additional_decode_kwargs) #b c t h w
                 else:
-                    raise Exception("XFormers not available, it is required for ToonCrafter decoder. Alternatively you can use a standard VAE Decode -node instead, but this has a negative effect on the image quality though.")
+                    decoded_images = self.model.decode_first_stage(batch_samples) #b c t h w     
+                #else:
+                #    raise Exception("XFormers not available, it is required for ToonCrafter decoder. Alternatively you can use a standard VAE Decode -node instead, but this has a negative effect on the image quality though.")
                 
                 video = decoded_images.detach().cpu()
                 video = torch.clamp(video.float(), -1., 1.)
