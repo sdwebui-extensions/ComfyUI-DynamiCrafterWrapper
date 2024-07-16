@@ -48,8 +48,8 @@ class DownloadAndLoadDynamiCrafterModel:
                         'dynamicrafter_512_fp16_pruned.safetensors',
                         'dynamicrafter_512_interp_fp16_pruned.safetensors',
                         'dynamicrafter_1024_fp16_pruned.safetensors',
-                        'dynamicrafter-CIL-512-no-watermark-pruned-fp16.safetensors',
-                        'dynamicrafter-CIL-1024-pruned-fp16.safetensors'
+                        'dynamicrafter-CIL-512-no-watermark-fixed-pruned-fp16.safetensors',
+                        'dynamicrafter-CIL-1024-no-watermark-pruned-fp16.safetensors'
                     ],
                     {
                     "default": 'tooncrafter_512_interp-pruned-fp16.safetensors'
@@ -403,6 +403,7 @@ class DynamiCrafterI2V:
         self.model.to(device)
         autocast_condition = (dtype != torch.float32) and not comfy.model_management.is_device_mps(device)
         with torch.autocast(comfy.model_management.get_autocast_device(device), dtype=dtype) if autocast_condition else nullcontext():
+            
             image = image.permute(0, 3, 1, 2).to(dtype).to(device)
             if augmentation_level > 0:
                 image += torch.randn_like(image) * augmentation_level
@@ -414,7 +415,7 @@ class DynamiCrafterI2V:
             if H % 64 != 0:
                 H = H - (H % 64)
             if orig_H % 64 != 0 or orig_W % 64 != 0:
-                image = F.interpolate(image, size=(H, W), mode="bicubic")
+                image = F.interpolate(image, size=(H, W), mode="bilinear")
            
             B, C, H, W = image.shape
             noise_shape = [B, self.model.model.diffusion_model.out_channels, frames, H // 8, W // 8]
@@ -424,14 +425,13 @@ class DynamiCrafterI2V:
             z = get_latent_z(self.model, encode_pixels) #bc,1,hw
 
             if image2 is not None:
-                image2 = image2 * 2 - 1
                 image2 = image2.permute(0, 3, 1, 2).to(dtype).to(device)
 
                 if augmentation_level > 0:
                     image2 += torch.randn_like(image2) * augmentation_level
 
                 if image2.shape != image.shape:
-                    image2 = F.interpolate(image, size=(H, W), mode="bicubic")
+                    image2 = F.interpolate(image, size=(H, W), mode="bilinear")
 
                 encode_pixels = image2.unsqueeze(2) * 2 - 1
                 z2 = get_latent_z(self.model, encode_pixels) #bc,1,hw
@@ -966,8 +966,9 @@ class DynamiCrafterBatchInterpolation:
         mm.soft_empty_cache()
 
         torch.manual_seed(seed)
-        dtype = model.dtype
+        
         self.model = model['model']
+        dtype = self.model.dtype
 
         if vae_dtype == "auto":
             try:
@@ -982,7 +983,6 @@ class DynamiCrafterBatchInterpolation:
         print(f"VAE using dtype: {self.model.first_stage_model.dtype}")
       
         self.model.to(device)
-        images = images * 2 - 1
         images = images.permute(0, 3, 1, 2).to(dtype).to(device)
         B, C, H, W = images.shape
         orig_H, orig_W = H, W
@@ -1005,8 +1005,11 @@ class DynamiCrafterBatchInterpolation:
 
                 self.model.first_stage_model.to(device)
 
-                z = get_latent_z(self.model, image.unsqueeze(2)) #bc,1,hw
-                z2 = get_latent_z(self.model, image2.unsqueeze(2)) #bc,1,hw
+                encode_pixels1 = image * 2 - 1
+                encode_pixels2 = image2 * 2 - 1
+
+                z = get_latent_z(self.model, encode_pixels1.unsqueeze(2)) #bc,1,hw
+                z2 = get_latent_z(self.model, encode_pixels2.unsqueeze(2)) #bc,1,hw
                 img_tensor_repeat = repeat(z, 'b c t h w -> b c (repeat t) h w', repeat=frames)
                 img_tensor_repeat = torch.zeros_like(img_tensor_repeat)
                 img_tensor_repeat[:,:,:1,:,:] = z
